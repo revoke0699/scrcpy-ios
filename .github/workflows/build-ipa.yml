@@ -1,0 +1,17 @@
+name: Build unsigned IPA
+on:
+  workflow_dispatch:
+  push:
+    branches: [build-ipa]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen cmake
+      - run: scripts/build-ios.sh device
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "ipa-${{ github.run_number }}" build/Scrcpy-unsigned.ipa --title "Scrcpy unsigned IPA" --notes "Sign with your own Apple ID (SideStore) before installing."
