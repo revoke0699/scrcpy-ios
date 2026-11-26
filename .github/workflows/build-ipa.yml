@@ -10,11 +10,56 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
-      - run: brew install xcodegen cmake
-      - name: Build device IPA
-        id: build
+      - name: Set up JDK 11 for the Android companion build
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+      - name: Check out scrcpy-apk v1.0.0 source
+        uses: actions/checkout@v4
+        with:
+          repository: moteng-network/scrcpy-apk
+          ref: v1.0.0
+          path: scrcpy-apk-src
+      - name: Build companion APK and seed microphone-server.jar
+        id: apk
         continue-on-error: true
         run: |
+          set -o pipefail
+          SDKM=$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")
+          yes | "$SDKM" "platforms;android-31" "build-tools;30.0.2" 2>&1 | tail -2
+          cd scrcpy-apk-src
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --stacktrace 2>&1 | tee ../apk.log
+          cd ..
+          python3 - <<'PYEOF'
+          import hashlib, zipfile
+          from pathlib import Path
+          apks = sorted(Path('scrcpy-apk-src/app/build/outputs/apk/release').glob('*.apk'))
+          assert apks, 'no APK produced'
+          with zipfile.ZipFile(apks[0]) as z:
+              dex = z.read('classes.dex')
+          digest = hashlib.sha256(dex).hexdigest()
+          print('classes.dex sha256:', digest)
+          Path('Resources').mkdir(exist_ok=True)
+          tmp = Path('Resources/microphone-server.jar.download')
+          with zipfile.ZipFile(tmp, 'w', compression=zipfile.ZIP_DEFLATED) as out:
+              out.writestr(zipfile.ZipInfo('classes.dex', date_time=(2026, 1, 1, 0, 0, 0)), dex)
+          tmp.replace('Resources/microphone-server.jar')
+          script = Path('scripts/prepare-resources.py')
+          text = script.read_text()
+          pinned = '3c128d4d004364b61ecf1fd71e1e2a10f23480f774857aaac449fd10ec89c851'
+          if digest != pinned:
+              assert pinned in text
+              script.write_text(text.replace(pinned, digest))
+              print('pinned dex hash updated to locally built dex')
+          PYEOF
+      - name: Build device IPA
+        id: build
+        if: steps.apk.outcome == 'success'
+        continue-on-error: true
+        run: |
+          brew install xcodegen cmake
           set -o pipefail
           scripts/build-ios.sh device 2>&1 | tee build.log
       - name: Publish build log tail
@@ -22,13 +67,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tail -n 500 build.log > build-tail.log || true
-          gh release create "log-${{ github.run_number }}" build-tail.log --title "Build log ${{ github.run_number }}" --notes "Last 500 lines of the build log." || true
+          { echo '===== apk.log tail ====='; tail -n 150 apk.log 2>/dev/null; echo '===== build.log tail ====='; tail -n 350 build.log 2>/dev/null; } > build-tail.log || true
+          gh release create "log-${{ github.run_number }}" build-tail.log --title "Build log ${{ github.run_number }}" --notes "Log tails for diagnosis." || true
       - name: Publish IPA
         if: steps.build.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "ipa-${{ github.run_number }}" build/Scrcpy-unsigned.ipa --title "Scrcpy unsigned IPA" --notes "Sign with your own Apple ID (SideStore) before installing."
       - name: Fail when build failed
-        if: steps.build.outcome != 'success'
+        if: steps.apk.outcome != 'success' || steps.build.outcome != 'success'
         run: exit 1
