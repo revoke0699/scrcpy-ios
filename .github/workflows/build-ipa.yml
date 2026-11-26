@@ -11,7 +11,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: brew install xcodegen cmake
-      - run: scripts/build-ios.sh device
-      - env:
+      - name: Build device IPA
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          scripts/build-ios.sh device 2>&1 | tee build.log
+      - name: Publish build log tail
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tail -n 500 build.log > build-tail.log || true
+          gh release create "log-${{ github.run_number }}" build-tail.log --title "Build log ${{ github.run_number }}" --notes "Last 500 lines of the build log." || true
+      - name: Publish IPA
+        if: steps.build.outcome == 'success'
+        env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "ipa-${{ github.run_number }}" build/Scrcpy-unsigned.ipa --title "Scrcpy unsigned IPA" --notes "Sign with your own Apple ID (SideStore) before installing."
+      - name: Fail when build failed
+        if: steps.build.outcome != 'success'
+        run: exit 1
